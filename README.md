@@ -9,6 +9,7 @@ A Python package for simulating rocket ascent through Earth's atmosphere with co
 - Configurable thrust and ISP curves
 - Visualization tools for analysis
 - Extensible architecture
+- Completely unreliable readme
 
 ## Installation
 
