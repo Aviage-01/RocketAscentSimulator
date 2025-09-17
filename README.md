@@ -67,4 +67,4 @@ results = simulator.simulate(t_span=(0, 500), max_step=1.0)
 
 ## License
 
-MIT - See [LICENSE](LICENSE) for details.
+Polyform Noncommercial - See [LICENSE](LICENSE) for details.
