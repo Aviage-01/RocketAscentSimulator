@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rocketSimulator"
+version = "0.1.0"
+description = "A Python package for simulating rocket ascent through Earth's atmosphere and into low Earth orbit."
+readme = "README.md"
+authors = [
+    {name = "Aviage", email = "Aviage01@gmail.com"}
+]
+license = "PolyForm-Noncommercial-1.0.0"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+requires-python = ">=3.8"
+dependencies = [
+    "numpy>=1.20.0",
+    "scipy>=1.7.0",
+    "matplotlib>=3.4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=6.0",
+    "pytest-cov>=2.0",
+    "black>=21.0",
+    "isort>=5.0",
+    "mypy>=0.9.0"
+]
+
+[project.urls]
+"Homepage" = "https://github.com/yourusername/rocket-simulator"
+"Bug Tracker" = "https://github.com/yourusername/rocket-simulator/issues"

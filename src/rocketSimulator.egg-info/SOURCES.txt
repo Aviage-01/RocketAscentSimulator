@@ -1,0 +1,14 @@
+LICENSE
+README.md
+pyproject.toml
+src/rocketSimulator/__init__.py
+src/rocketSimulator/__main__.py
+src/rocketSimulator/core.py
+src/rocketSimulator/models.py
+src/rocketSimulator/plotting.py
+src/rocketSimulator.egg-info/PKG-INFO
+src/rocketSimulator.egg-info/SOURCES.txt
+src/rocketSimulator.egg-info/dependency_links.txt
+src/rocketSimulator.egg-info/requires.txt
+src/rocketSimulator.egg-info/top_level.txt
+tests/test_core.py
