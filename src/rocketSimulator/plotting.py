@@ -65,7 +65,7 @@ def plot_results(results: Dict, show: bool = True, save_path: Optional[str] = No
     for stage_num, color in zip(unique_stages, colors):
         mask = stages == stage_num
         axes[1, 1].plot(results['t'][mask],
-                        np.linalg.norm(results['rocket']._get_drag(states, stage_num=stages)[mask], axis=1),
+                        np.linalg.norm(results['rocket']._get_drag(states, stage_num=stages).T[mask], axis=1),
                         color=color, label=f"Stage {int(stage_num)+1}")
 
     axes[1, 1].set_title("Drag vs Time")
