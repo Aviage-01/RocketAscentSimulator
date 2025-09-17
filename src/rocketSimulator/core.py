@@ -74,48 +74,77 @@ class RocketAscentSimulator:
         """Calculate gravitational acceleration at given altitude."""
         return G * M_earth / (R_earth + altitude) ** 2
 
-    def _get_thrust_and_mass_flow(self, t: float, state: np.ndarray, stage_num=None, thrust_only=False) -> Tuple[
-        float, float]:
+    def _get_thrust_and_mass_flow(self, t: float, state: np.ndarray,
+                                  stage_num: Optional[np.ndarray] = None,
+                                  thrust_only: bool = False) -> np.ndarray:
         """
-        Get current thrust and mass flow rate.
+        Vectorised computation of thrust and mass flow for multiple states and stages.
 
         Args:
             t: Current time (s)
-            state: Current state vector [x, y, vx, vy, m]
+            state: array of shape (5, N) representing [x, y, vx, vy, m] for N states
+            stage_num: array of stage indices, length N, or None to use self._current_stage
+            thrust_only: if True, return only thrust
 
         Returns:
-            Tuple of (thrust in N, mass flow rate in kg/s)
+            array of shape (2, N) for [thrust, mass_flow] if thrust_only=False,
+            or shape (N,) if thrust_only=True
         """
 
-        stage_num = self._current_stage if stage_num == None else stage_num
+        state = np.array(state)
+        if state.ndim == 1:
+            state = state.reshape(-1, 1)
 
-        if stage_num >= len(self.stages):
-            return np.array([0.0, 0.0])
+        m = np.atleast_1d(state[4]) # rocket masses
+        N = len(m)
 
-        x, y, vx, vy, m = state
-        stage = self.stages[stage_num]
+        # Broadcast stage_num
+        if stage_num is None:
+            stage_num = np.full(N, self._current_stage, dtype=int)
+        elif isinstance(stage_num, (int, float, np.integer, np.floating)):  # scalar
+            stage_num = np.full(N, int(stage_num), dtype=int)
+        elif isinstance(stage_num, (list, np.ndarray)):
+            stage_num = np.array(stage_num, dtype=int)
+            if stage_num.size != N:
+                raise ValueError(f"stage_num must have length {N}, got {stage_num.size}")
 
-        # Sum the masses of all upper stages (dry + propellant)
-        upper_stages_mass = sum([s.dry_mass + s.propellant_mass for s in self.stages[stage_num + 1:]])
+        else:
+            raise TypeError(f"stage_num must be None, scalar, list, or ndarray, got {type(stage_num)}")
 
-        # Current stage propellant = total mass - upper stages - current stage dry mass
-        stage_current_prop = m - upper_stages_mass - stage.dry_mass
+        thrust_arr = np.zeros(N, dtype=float)
+        mass_flow_arr = np.zeros(N, dtype=float)
 
-        stage_current_prop = np.maximum(stage_current_prop, 0.0)
+        for sn in np.unique(stage_num):
+            mask = stage_num == sn
+            if sn >= len(self.stages):
+                continue
 
-        # Calculate thrust and mass flow rate
-        current_thrust = stage.thrust(t - self._current_stage_start_time, state)
-        current_isp = stage.isp(t - self._current_stage_start_time, state)
-        epsilon = 1e-12
-        mass_flow = np.where(current_isp > 0, current_thrust / (np.maximum(current_isp, epsilon) * g0), 0.0)
-        # Check if we've run out of propellant
-        current_thrust = np.where(stage_current_prop <= 0, 0.0, current_thrust)
-        mass_flow = np.where(stage_current_prop <= 0, 0.0, mass_flow)
+            stage = self.stages[sn]
+
+            # Upper stages mass
+            upper_stages_mass = sum([s.dry_mass + s.propellant_mass for s in self.stages[sn + 1:]])
+
+            # Current stage propellant
+            stage_current_prop = m[mask] - upper_stages_mass - stage.dry_mass
+            stage_current_prop = np.maximum(stage_current_prop, 0.0)
+
+            # Vectorised thrust and ISP
+            current_thrust = stage.thrust(t, state[:, mask])
+            current_isp = stage.isp(t, state[:, mask])
+            epsilon = 1e-12
+            mass_flow = np.where(current_isp > 0, current_thrust / (np.maximum(current_isp, epsilon) * g0), 0.0)
+
+            # Zero out exhausted stages
+            current_thrust = np.where(stage_current_prop <= 0, 0.0, current_thrust)
+            mass_flow = np.where(stage_current_prop <= 0, 0.0, mass_flow)
+
+            thrust_arr[mask] = current_thrust
+            mass_flow_arr[mask] = mass_flow
 
         if thrust_only:
-            return current_thrust
+            return thrust_arr
 
-        return np.array([current_thrust, mass_flow])
+        return np.vstack([thrust_arr, mass_flow_arr])
 
     def _get_drag(self, state: np.ndarray, stage_num=None) -> float:
         """
@@ -132,13 +161,26 @@ class RocketAscentSimulator:
         altitude = np.sqrt(state[0] ** 2 + state[1] ** 2) - R_earth
         rho, _ = self._atmosphere_model(altitude)
 
-        if stage_num is None:
-            stage_num = self._current_stage
-
         vx_arr = np.atleast_1d(vx)
         vy_arr = np.atleast_1d(vy)
         v_arr = np.atleast_1d(v)
         rho_arr = np.atleast_1d(rho)
+
+        N = len(v_arr)
+
+        # Broadcast stage_num
+        if stage_num is None:
+            stage_num = np.full(N, self._current_stage, dtype=int)
+        elif isinstance(stage_num, (int, float, np.integer, np.floating)):  # scalar
+            stage_num = np.full(N, int(stage_num), dtype=int)
+        elif isinstance(stage_num, (list, np.ndarray)):
+            stage_num = np.array(stage_num, dtype=int)
+            if stage_num.size != N:
+                raise ValueError(f"stage_num must have length {N}, got {stage_num.size}")
+
+        else:
+            raise TypeError(f"stage_num must be None, scalar, list, or ndarray, got {type(stage_num)}")
+
         stage_num_arr = np.atleast_1d(stage_num)
 
         drag_force = np.zeros_like(v_arr, dtype=float)
@@ -173,15 +215,19 @@ class RocketAscentSimulator:
         if np.isscalar(vx) and np.isscalar(vy):
             drag_vector = drag_vector[0]
 
-        return drag_vector
+        return drag_vector.T
 
-    def _equations_of_motion(self, t: float, state: np.ndarray, control = None) -> np.ndarray:
+    def _equations_of_motion(self, t: float, state: np.ndarray, control = None, stage_num = None) -> np.ndarray:
         """
         Calculate time derivatives of the state vector.
 
         State vector: [x, y, vx, vy, m]
         Derivatives: [dx/dt, dy/dt, dvx/dt, dvy/dt, dm/dt]
         """
+
+        if stage_num is None:
+            stage_num = self._current_stage
+
         x, y, vx, vy, m = state
         r = np.array([x, y])
         r_mag = np.linalg.norm(r)
@@ -201,16 +247,23 @@ class RocketAscentSimulator:
         thrust_dir = -np.cos(pitch) * tangent_unit + np.sin(pitch) * radial_unit
 
         # Get thrust and mass flow rate
-        thrust, m_dot = throttle * self._get_thrust_and_mass_flow(t, state)
+        thrust, m_dot = throttle * self._get_thrust_and_mass_flow(t, state, stage_num=stage_num)
 
         # Calculate gravity
         g = self._gravity(altitude)
         g_vector = -g * radial_unit
 
-        drag_vector = self._get_drag(state)  # modify _get_drag to accept arrays if needed
+        drag_vector = self._get_drag(state, stage_num = stage_num)  # modify _get_drag to accept arrays if needed
 
         # Total acceleration
-        a = (thrust * thrust_dir + drag_vector) / m + g_vector
+
+
+        try:
+            a = (thrust * thrust_dir + drag_vector) / m + g_vector
+
+        except:
+            print("thrust, direction, drag", thrust, thrust_dir, drag_vector)
+            raise
 
         vx, vy = np.squeeze(vx), np.squeeze(vy)
         ax, ay = np.squeeze(a[0]), np.squeeze(a[1])
@@ -427,6 +480,7 @@ class RocketAscentSimulator:
 
 
         return e
+
     def _orbital_period(self, state):
         """Return orbital period in seconds (assuming closed orbit)."""
         a = self._semi_major_axis(state)
@@ -444,6 +498,38 @@ class RocketAscentSimulator:
         rp = a * (1 - e)
         ra = a * (1 + e)
         return rp, ra
+
+    def get_current_stage(self, state: np.ndarray) -> np.ndarray:
+        """
+        Determine current stage index from rocket mass, vectorised.
+
+        Args:
+            mass: scalar or 1D array of rocket masses
+            stages: list of RocketStage objects in launch order
+
+        Returns:
+            np.ndarray of stage indices (or int if scalar input)
+        """
+        mass = np.atleast_1d(state[4])
+        n_stages = len(self.stages)
+
+        # Precompute stage mass limits using a running total of upper stages
+        stage_mass_limits = np.zeros(n_stages)
+        upper_mass = 0.0
+        for i in reversed(range(n_stages)):
+            stage_mass_limits[i] = self.stages[i].dry_mass + upper_mass
+            upper_mass += self.stages[i].dry_mass + self.stages[i].propellant_mass
+
+        # Vectorised assignment: find first stage whose limit >= current mass
+        stage_num = np.zeros_like(mass, dtype=int)
+        for i in range(n_stages):
+            mask = mass <= stage_mass_limits[i]
+            stage_num[mask] = i
+
+        if stage_num.size == 1:
+            return int(stage_num[0])
+
+        return stage_num
 
     def _jacobian_eom(self, states: np.ndarray, t: float, eps: float = 1e-6) -> np.ndarray:
         """
@@ -500,15 +586,17 @@ class RocketAscentSimulator:
         lam = y[5:, :]
 
         # Compute optimal controls vectorised
-        pitch, throttle = self._optimal_control_from_costates(states, lam, stage_num)
+        pitch, throttle = self._optimal_control_from_costates(states, lam, stage_num = stage_num)
 
         # Compute state derivatives vectorised
-        dstate_dt = self._equations_of_motion(t, states, control=(pitch, throttle))
+        dstate_dt = self._equations_of_motion(t, states, control=(pitch, throttle), stage_num = stage_num)
 
         # Compute costate derivatives vectorised
         dlam_dt = self._costates_ode(t, lam, states, stage_num)
 
         dydt = np.vstack([dstate_dt, dlam_dt])
+
+        return dydt
 
     def _optimal_control_from_costates(self, states: np.ndarray, costates: np.ndarray, stage_num=None):
         """
@@ -529,7 +617,16 @@ class RocketAscentSimulator:
         """Full BVP ascent simulation using Hamiltonian optimisation."""
         # 1. Generate initial guess from casual simulation
         causal_results = self.causal_simulate(t_span, max_step=max_step)
+
+        print("causal step finished. Moving to hamiltonian")
+
         t_guess = causal_results['t']
+
+        t_guess = t_guess.copy()
+        for i in range(1, len(t_guess)):
+            if t_guess[i] <= t_guess[i - 1]:
+                t_guess[i] = t_guess[i - 1] + 1e-12  # tiny increment
+
         state_guess = np.vstack([causal_results['x'],
                                  causal_results['y'],
                                  causal_results['vx'],
@@ -537,7 +634,7 @@ class RocketAscentSimulator:
                                  causal_results['m']])
 
         # 2. Initialize costates guess (zeros)
-        lam_guess = np.zeros_like(state_guess)
+        lam_guess = np.zeros_like(state_guess) + 1e-6
         y_guess = np.vstack([state_guess, lam_guess])
 
         # 3. Define BCs
@@ -581,7 +678,7 @@ class RocketAscentSimulator:
             'vx': states[2],
             'vy': states[3],
             'm': states[4],
-            'stage': np.zeros_like(sol.x),  # multi-stage logic can modify this
+            'stage': self.get_current_stage(states),  # multi-stage logic can modify this
             'rocket': self,
             'success': sol.success,
             'message': sol.message
