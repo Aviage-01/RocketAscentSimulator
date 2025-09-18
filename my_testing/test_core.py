@@ -823,6 +823,82 @@ def test_falcon9_orbital_ascent_hamiltonian():
     assert results['altitude'][-1] > 180000
     assert results['velocity'][-1] > 7500
 
+def test_simple_rocket_hamiltonian():
+
+
+    R_EARTH = 6.371e6
+    g0 = 9.80665
+
+    stage1 = RocketStage(
+        dry_mass=25000,
+        propellant_mass=100000,
+        thrust=lambda t, y: 1e6,
+        isp=lambda t,y: 1e6,
+        stage_criteria=lambda t, y: 1,  # burn until empty
+        drag_coeff=lambda s: 0.3,
+        lift_coeff=lambda s: 0.0,
+        reference_area=10.0
+    )
+
+    def ascent_profile3(self, t, state):
+        """
+        Parameterised ascent profile with respect to altitude
+
+        Returns (pitch, throttle) where pitch is angle relative to local tangent:
+          0 = thrust along local prograde (tangent),
+          +pi/2 = thrust fully radial-out.
+        """
+
+        vertical_until = 0
+        troposphere_ascent = 100
+        level_asymptote = 90e3
+
+        # Make sure state is array-shaped: shape (N, 5)
+        x = state[0]
+        y = state[1]
+        vx = state[2]
+        vy = state[3]
+        m = state[4]  # total mass
+
+        # geometry & kinematics
+        r = np.sqrt(x * x + y * y)  # radius from Earth's centre
+        alt = r - R_EARTH
+
+        pitch_cmd = np.where(
+            alt < vertical_until, np.pi / 2,
+            np.where(
+                alt < troposphere_ascent,
+                np.pi / 2 - (alt - vertical_until) / (troposphere_ascent - vertical_until) * (
+                            np.pi / 2 - np.radians(80)),
+                0
+            )
+        )
+
+        pitch_cmd = np.where(
+            alt < level_asymptote,
+            np.where(alt > troposphere_ascent,
+                     np.radians(80) - (alt - troposphere_ascent) / (level_asymptote - troposphere_ascent) * np.radians(
+                         80), pitch_cmd),
+            np.pi / 16  # pitch_cmd
+        )
+
+        # Make throttle full unless a_thrust is extremely small; can be tuned later
+        throttle = np.ones_like(pitch_cmd)
+
+        # If vector had shape (1,5) and user expects scalars, squeeze
+        pitch_out = np.squeeze(pitch_cmd)
+        # print(np.degrees(pitch_out), alt)
+        throttle_out = np.squeeze(throttle)
+
+        return pitch_out, throttle_out
+
+    simulator = RocketAscentSimulator([stage1], ascent_profile3)
+
+    results = simulator.simulate(t_span=(0, 8000), max_step=1.0, causal=False)
+
+    plot_results(results)
+
+
 
 # Add more my_testing as needed
 #test_rocket_stage_initialization()

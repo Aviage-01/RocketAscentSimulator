@@ -32,6 +32,7 @@ class RocketAscentSimulator:
         self._current_stage = 0
         self._current_stage_start_time = 0.0
 
+
     def _atmosphere_model(self, altitude: Union[float, int, np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
         """
         Simple exponential atmosphere model.
@@ -217,7 +218,7 @@ class RocketAscentSimulator:
 
         return drag_vector.T
 
-    def _equations_of_motion(self, t: float, state: np.ndarray, control = None, stage_num = None) -> np.ndarray:
+    def _equations_of_motion(self, t: float, state: np.ndarray, control = None, stage_num = None, hamiltonian_staging = False) -> np.ndarray:
         """
         Calculate time derivatives of the state vector.
 
@@ -517,8 +518,9 @@ class RocketAscentSimulator:
         stage_mass_limits = np.zeros(n_stages)
         upper_mass = 0.0
         for i in reversed(range(n_stages)):
-            stage_mass_limits[i] = self.stages[i].dry_mass + upper_mass
+            stage_mass_limits[i] = self.stages[i].dry_mass + self.stages[i].propellant_mass + upper_mass
             upper_mass += self.stages[i].dry_mass + self.stages[i].propellant_mass
+
 
         # Vectorised assignment: find first stage whose limit >= current mass
         stage_num = np.zeros_like(mass, dtype=int)
@@ -574,7 +576,9 @@ class RocketAscentSimulator:
             dlam_dt = -J.T @ lam
         else:
             # batch: multiply each 5x5 slice by corresponding lam column
+
             dlam_dt = -np.einsum('ijk,jk->ik', J, lam)
+
         return dlam_dt
 
     def _hamiltonian(self, t: float, y: np.ndarray, stage_num=None) -> np.ndarray:
@@ -584,6 +588,21 @@ class RocketAscentSimulator:
         """
         states = y[:5, :]
         lam = y[5:, :]
+
+        N = len(states[0])
+
+        # Broadcast stage_num
+        if stage_num is None:
+            stage_num = self.get_current_stage(states)
+        elif isinstance(stage_num, (int, float, np.integer, np.floating)):  # scalar
+            stage_num = np.full(N, int(stage_num), dtype=int)
+        elif isinstance(stage_num, (list, np.ndarray)):
+            stage_num = np.array(stage_num, dtype=int)
+            if stage_num.size != N:
+                raise ValueError(f"stage_num must have length {N}, got {stage_num.size}")
+
+        else:
+            raise TypeError(f"stage_num must be None, scalar, list, or ndarray, got {type(stage_num)}")
 
         # Compute optimal controls vectorised
         pitch, throttle = self._optimal_control_from_costates(states, lam, stage_num = stage_num)
@@ -651,17 +670,99 @@ class RocketAscentSimulator:
             # Final orbit target (fixed)
             target_alt = 200e3
             r_final = R_earth + target_alt
+
+            peri, apo = self._perigee_apogee(yb[:5])
             # Ideally, constrain final radius and circular orbit velocity
-            v_circ = np.sqrt(mu / r_final)
-            bcs.append(yb[0] ** 2 + yb[1] ** 2 - r_final ** 2)  # final radius squared
-            bcs.append(np.sqrt(yb[2] ** 2 + yb[3] ** 2) - v_circ)  # circular orbit speed
+
+            bcs.append((peri-r_final)/R_earth)  # final peri
+            bcs.append((apo-r_final)/R_earth)  # final radius squared
 
             # Costate BCs
             bcs.append(yb[5 + 4] + 1.0)  # λ_m(t_f) = -1  (maximize remaining mass)
-            # other costates can be free or zero
-            bcs.extend([0] * 2)  # λ_x, λ_y, λ_vx, λ_vy free
+
+            # Now add the two conjugate-to-angle conditions (position-angle and velocity-heading)
+            # Indices: λ_x = yb[5], λ_y = yb[6], λ_vx = yb[7], λ_vy = yb[8]
+            theta_f = np.arctan2(yb[1], yb[0])  # final position angle
+            phi_f = np.arctan2(yb[3], yb[2])  # final velocity heading
+
+            # p_theta ~ -λ_x*sin(theta) + λ_y*cos(theta) = 0
+            bcs.append(1e4 * (-yb[5] * np.sin(theta_f) + yb[6] * np.cos(theta_f)))
+
+            # p_phi ~ -λ_vx*sin(phi) + λ_vy*cos(phi) = 0
+            bcs.append(1e6 * (-yb[7] * np.sin(phi_f) + yb[8] * np.cos(phi_f)))
 
             return np.array(bcs)
+
+        def diagnose_bcs(bc_fn, Y_guess, eps=1e-6, verbose=True):
+            """
+            Diagnose boundary conditions for a BVP.
+
+            Args:
+                bc_fn: function(ya, yb) -> residuals (1D array)
+                Y_guess: initial guess array shape (n, m) where n = number of eqns, m = nodes
+                eps: finite-difference step for numeric Jacobian
+            Returns:
+                dict with diagnostics
+            """
+            n, m = Y_guess.shape
+            ya = Y_guess[:, 0].astype(float).copy()
+            yb = Y_guess[:, -1].astype(float).copy()
+
+            # Evaluate BC residuals
+            try:
+                res = np.atleast_1d(bc_fn(ya, yb)).astype(float)
+            except Exception as e:
+                raise RuntimeError(f"bc_fn raised an exception when evaluated on endpoints: {e!r}")
+
+            if verbose:
+                print("n (system size) =", n)
+                print("len(bc(ya,yb)) =", res.size)
+                print("bc residuals at initial guess (ya,yb):\n", res)
+
+            if res.size != n:
+                raise ValueError(f"Number of BC residuals ({res.size}) != system dimension n ({n}).")
+
+            # Numerical Jacobian: partials of res wrt ya and wrt yb
+            J = np.zeros((n, 2 * n), dtype=float)
+            # perturb ya columns
+            for i in range(n):
+                ya_pert = ya.copy()
+                ya_pert[i] += eps
+                r_pert = np.atleast_1d(bc_fn(ya_pert, yb)).astype(float)
+                J[:, i] = (r_pert - res) / eps
+
+            # perturb yb columns
+            for i in range(n):
+                yb_pert = yb.copy()
+                yb_pert[i] += eps
+                r_pert = np.atleast_1d(bc_fn(ya, yb_pert)).astype(float)
+                J[:, n + i] = (r_pert - res) / eps
+
+            # Compute numeric rank of J (use SVD)
+            u, s, vh = np.linalg.svd(J, full_matrices=False)
+            tol = max(J.shape) * np.amax(s) * np.finfo(float).eps
+            rank = np.sum(s > tol)
+
+            if verbose:
+                print("\nJacobian shape:", J.shape)
+                print("Singular values:", s)
+                print("Numeric rank:", rank, " (expected n =", n, ")")
+                if rank < n:
+                    print("-> BC Jacobian is rank-deficient. BCs may be dependent or inadequate.")
+                else:
+                    print("-> BC Jacobian appears full rank.")
+
+            return {
+                "n": n,
+                "residuals": res,
+                "J": J,
+                "singular_values": s,
+                "rank": rank,
+                "tol": tol
+            }
+
+        diag = diagnose_bcs(bc, y_guess, verbose = True)
+        print(diag)
 
         # 4. Solve BVP
         sol = solve_bvp(lambda t, y: self._hamiltonian(t, y), bc, t_guess, y_guess, **solver_kwargs)
