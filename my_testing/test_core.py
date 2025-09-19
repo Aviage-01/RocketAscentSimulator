@@ -832,8 +832,8 @@ def test_simple_rocket_hamiltonian():
     stage1 = RocketStage(
         dry_mass=25000,
         propellant_mass=100000,
-        thrust=lambda t, y: 1e6,
-        isp=lambda t,y: 1e6,
+        thrust=lambda t, y: 1e8,
+        isp=lambda t,y: 6e2,
         stage_criteria=lambda t, y: 1,  # burn until empty
         drag_coeff=lambda s: 0.3,
         lift_coeff=lambda s: 0.0,

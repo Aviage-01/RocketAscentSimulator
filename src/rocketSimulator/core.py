@@ -5,6 +5,7 @@ from typing import Callable, Dict, List, Optional, Tuple, Union
 from types import MethodType
 import numpy as np
 from scipy.integrate import solve_ivp, solve_bvp
+from numba import njit
 
 try:
     from models import *
@@ -32,7 +33,7 @@ class RocketAscentSimulator:
         self._current_stage = 0
         self._current_stage_start_time = 0.0
 
-
+    #@njit
     def _atmosphere_model(self, altitude: Union[float, int, np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
         """
         Simple exponential atmosphere model.
@@ -70,11 +71,12 @@ class RocketAscentSimulator:
         if np.ndim(altitude) == 0 or altitude.shape == ():
             return float(rho[0]), float(p[0])
         return rho, p
-
+    #@njit
     def _gravity(self, altitude: float) -> float:
         """Calculate gravitational acceleration at given altitude."""
         return G * M_earth / (R_earth + altitude) ** 2
 
+    #@njit
     def _get_thrust_and_mass_flow(self, t: float, state: np.ndarray,
                                   stage_num: Optional[np.ndarray] = None,
                                   thrust_only: bool = False) -> np.ndarray:
@@ -147,6 +149,7 @@ class RocketAscentSimulator:
 
         return np.vstack([thrust_arr, mass_flow_arr])
 
+    #@njit
     def _get_drag(self, state: np.ndarray, stage_num=None) -> float:
         """
         Calculate drag force.
@@ -271,6 +274,8 @@ class RocketAscentSimulator:
         m_dot_val = np.squeeze(m_dot)
 
         dstate_dt = np.array([vx, vy, ax, ay, -m_dot_val])
+        if state.ndim > dstate_dt.ndim:
+            dstate_dt = np.array([dstate_dt]).T
 
         return dstate_dt
 
@@ -675,7 +680,8 @@ class RocketAscentSimulator:
             # Ideally, constrain final radius and circular orbit velocity
 
             bcs.append((peri-r_final)/R_earth)  # final peri
-            bcs.append((apo-r_final)/R_earth)  # final radius squared
+            #bcs.append((apo-r_final)/R_earth)  # final radius squared
+            #bcs.append(0)
 
             # Costate BCs
             bcs.append(yb[5 + 4] + 1.0)  # λ_m(t_f) = -1  (maximize remaining mass)
@@ -687,9 +693,16 @@ class RocketAscentSimulator:
 
             # p_theta ~ -λ_x*sin(theta) + λ_y*cos(theta) = 0
             bcs.append(1e4 * (-yb[5] * np.sin(theta_f) + yb[6] * np.cos(theta_f)))
+            #bcs.append(0)
 
             # p_phi ~ -λ_vx*sin(phi) + λ_vy*cos(phi) = 0
-            bcs.append(1e6 * (-yb[7] * np.sin(phi_f) + yb[8] * np.cos(phi_f)))
+            #bcs.append(1e6 * (-yb[7] * np.sin(phi_f) + yb[8] * np.cos(phi_f)))
+
+            # enforce clockwise orbit
+            x, y = yb[0], yb[1]
+            vx, vy = yb[2], yb[3]
+            bcs.append((x * vy - y * vx) / (np.sqrt(x ** 2 + y ** 2) * np.sqrt(vx ** 2 + vy ** 2)) + 1)
+            bcs.append(yb[6])
 
             return np.array(bcs)
 
@@ -761,8 +774,44 @@ class RocketAscentSimulator:
                 "tol": tol
             }
 
+        def diagnose_bc_linear_dependence(bc_fn, ya, yb, eps=1e-6):
+            # evaluate residuals
+            res = np.atleast_1d(bc_fn(ya, yb)).astype(float)
+            n = res.size
+
+            # numeric Jacobian w.r.t. ya and yb endpoints
+            J = np.zeros((n, 2 * n), dtype=float)
+            ya0 = ya.astype(float).copy()
+            yb0 = yb.astype(float).copy()
+
+            for i in range(n):
+                ya_p = ya0.copy();
+                ya_p[i] += eps
+                r_p = np.atleast_1d(bc_fn(ya_p, yb0))
+                J[:, i] = (r_p - res) / eps
+
+            for i in range(n):
+                yb_p = yb0.copy();
+                yb_p[i] += eps
+                r_p = np.atleast_1d(bc_fn(ya0, yb_p))
+                J[:, n + i] = (r_p - res) / eps
+
+            # SVD
+            u, s, vh = np.linalg.svd(J, full_matrices=False)
+            print("singular values:", s)
+            print("smallest singular value:", s[-1])
+            if s[-1] < 1e-9:
+                nullvec = vh[-1, :]  # right singular vector of smallest SV
+                print("approx nullspace vector (length 2n):", nullvec)
+                # split to ya/yb contributions
+                print("-> combination of BCs (ya part):", nullvec[:n])
+                print("-> combination of BCs (yb part):", nullvec[n:])
+            return J, s, vh
+
         diag = diagnose_bcs(bc, y_guess, verbose = True)
+        lin_diag = diagnose_bc_linear_dependence(bc, y_guess[:, 0], y_guess[:, -1])
         print(diag)
+        print(lin_diag)
 
         # 4. Solve BVP
         sol = solve_bvp(lambda t, y: self._hamiltonian(t, y), bc, t_guess, y_guess, **solver_kwargs)
